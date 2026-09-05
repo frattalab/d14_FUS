@@ -1,0 +1,2041 @@
+---
+title: "d14"
+format: html
+number_sections: true
+toc: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+# FUS target
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(ggsignif)
+library(stringr)
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(DESeq2)
+library(data.table)
+library(ggsci)
+library(ggrepel)
+library(tximport)
+library(patchwork)
+library(tidyr)
+library(clusterProfiler)
+library(DOSE)
+library(VennDiagram)
+library(Rsamtools)
+library(GenomicAlignments)
+library(GenomicFeatures)
+library(txdbmaker)
+library(UpSetR)
+library(ComplexUpset)
+library(ggalluvial)
+library(enrichplot)
+library(genekitr)
+
+conflicted::conflicts_prefer(base::intersect)
+conflicted::conflicts_prefer(base::setdiff)
+conflicted::conflicts_prefer(dplyr::filter)
+conflicted::conflicts_prefer(dplyr::select)
+conflicted::conflicts_prefer(base::as.factor)
+conflicted::conflicts_prefer(base::union)
+conflicted::conflicts_prefer(dplyr::count)
+```
+
+
+```{r setup, include=FALSE}
+p_cutoff <- 0.05 
+logfc_cutoff <- 0.0
+
+# not included into github
+txdb <- loadDb("~/Documents/references/gencode.vM22.annotation.TxDb")
+bam_dir <- "~/Documents/d14homs/"
+ribo_counts_dir <- "~/Documents/d14homs/riboseq_feature_counts/"
+ribo_embryo_dir <- "~/Documents/d14homs/KallistoResultsEmbryo/"
+```
+
+
+```{r setup, include=FALSE}
+fus_target <- read.csv("data/filtered_mm9_fus_mature_iclip.csv.gz")
+fus_all_target <- read.csv("data/filtered_mm9_fus_all_target_iclip.csv.gz")
+
+fus_target <- fus_target %>%
+   filter(FDR<0.1)
+fus_target_l_fdr <- unique(fus_target[,"annot_symbol"])
+
+fus_all_target_l_fdr <- unique(
+  fus_all_target %>%
+   filter(FDR<0.1) %>% 
+     pull("annot_symbol"))
+
+fmrp_target <- read.csv("data/fmrp_target.csv.gz")
+fmrp_target <- fmrp_target$Symbol.from.mm9
+```
+
+
+```{r setup, include=FALSE}
+hom_label <- "Fus∆14/∆14"
+het_label <- "Fus+/∆14" 
+wt_label <- "Fus+/+" 
+ko_label <- "Fus-/-"
+
+purple_color <- "#752881"
+light_purple_color <- "#986EAB"
+light_green_color <- "#B1D6B5"
+green_color <- "#5BAE63"
+dark_green_color <- "#15602F"
+mixed_color <- "#A4A4B1"
+dark_gray_color <- "#545454"
+```
+
+# FeatureCounts
+
+```{r}
+#| echo: false
+
+d14metadata <- read.csv("data/metadata_snakemake.csv")
+d14metadata$genotype <- as.factor(d14metadata$genotype)
+d14metadata$genotype <- relevel(d14metadata$genotype, "WT")
+d14metadata$age_month <- as.factor(d14metadata$age_month)
+d14metadata <- d14metadata %>% filter(sample_name != "D14_HET3_5")
+  
+annot_counts <- read.csv("data/d14_annotated_raw_count.csv")
+annot_counts <- annot_counts[!duplicated(annot_counts$gene_name), ]
+rownames(annot_counts) <- NULL
+fcounts_mat <- (annot_counts %>% 
+                          dplyr::select(-X))
+dds = DESeqDataSetFromMatrix(countData = fcounts_mat,
+                             colData = d14metadata,
+                             design = ~genotype + age_month,
+                             tidy=TRUE)
+keep_dds <- rowSums(counts(dds)) >= 10
+dds <- dds[keep_dds,]
+dds$group <- factor(dds$group)
+design(dds) <- ~group
+dds <- DESeq(dds)
+```
+
+```{r}
+hom1_res <- DESeq2::results(dds, contrast=c("group", "HOM1", "WT1"),  tidy=TRUE)
+hom1_res <- hom1_res %>%
+  mutate( is_fus_target = case_when(
+    row %in% fus_all_target_l_fdr ~ TRUE,
+                         T ~ FALSE))
+
+hom3_res <- DESeq2::results(dds, contrast=c("group", "HOM3", "WT3"),  tidy=TRUE)
+hom3_res <- hom3_res %>%
+  mutate( is_fus_target = case_when(
+    row %in% fus_all_target_l_fdr ~ TRUE,
+                         T ~ FALSE))
+
+ko_res <- DESeq2::results(dds, contrast=c("group", "KO_HOM", "KO_WT"),  tidy=TRUE)
+ko_res <- ko_res %>%
+  mutate( is_fus_target = case_when(
+    row %in% fus_all_target_l_fdr ~ TRUE,
+                         T ~ FALSE))
+
+```
+
+## fus-binding
+
+```{r}
+ko_res$is_de <- ifelse(!is.na(ko_res$padj) & ko_res$padj < p_cutoff & abs(ko_res$log2FoldChange) > logfc_cutoff, TRUE, FALSE)
+hom3_res$is_de <- ifelse(!is.na(hom3_res$padj) & hom3_res$padj < p_cutoff & abs(hom3_res$log2FoldChange) > logfc_cutoff, TRUE, FALSE)
+hom1_res$is_de <- ifelse(!is.na(hom1_res$padj) & hom1_res$padj < p_cutoff & abs(hom1_res$log2FoldChange) > logfc_cutoff, TRUE, FALSE)
+
+pct_fus_trg_de_hom1 <- sum(hom1_res$is_fus_target & hom1_res$is_de) / sum(hom1_res$is_de) * 100
+pct_fus_trg_all_hom1 <- sum(hom1_res$is_fus_target) / nrow(hom1_res) * 100
+pct_fus_trg_de_hom3 <- sum(hom3_res$is_fus_target & hom3_res$is_de) / sum(hom3_res$is_de) * 100
+pct_fus_trg_all_hom3 <- sum(hom3_res$is_fus_target) / nrow(hom3_res) * 100
+pct_fus_trg_de_ko <- sum(ko_res$is_fus_target & ko_res$is_de) / sum(ko_res$is_de) * 100
+pct_fus_trg_all_ko <- sum(ko_res$is_fus_target) / nrow(ko_res) * 100
+
+table_hom1 <- matrix(c(sum(hom1_res$is_fus_target & hom1_res$is_de),
+              sum(hom1_res$is_de) - sum(hom1_res$is_fus_target & hom1_res$is_de),
+                      sum(hom1_res$is_fus_target), 
+                      nrow(hom1_res) - sum(hom1_res$is_fus_target)),
+                     nrow = 2)
+fisher_test_hom1 <- fisher.test(table_hom1)
+
+table_hom3 <- matrix(c(sum(hom3_res$is_fus_target & hom3_res$is_de),
+              sum(hom3_res$is_de) - sum(hom3_res$is_fus_target & hom3_res$is_de),
+                      sum(hom3_res$is_fus_target), 
+                      nrow(hom3_res) - sum(hom3_res$is_fus_target)),
+                     nrow = 2)
+
+fisher_test_hom3 <- fisher.test(table_hom3)
+
+table_ko <- matrix(c(sum(ko_res$is_fus_target & ko_res$is_de), 
+                     sum(ko_res$is_de) - sum(ko_res$is_fus_target & ko_res$is_de),
+                     sum(ko_res$is_fus_target), 
+                     nrow(ko_res) - sum(ko_res$is_fus_target)),
+                    nrow = 2)
+
+fisher_test_ko <- fisher.test(table_ko)
+
+plot_data <- data.frame(
+  category = c("DE genes", "All genes", "DE genes", "All genes", "DE genes", "All genes"),
+  percentage = c(pct_fus_trg_de_hom1, pct_fus_trg_all_hom1, 
+                 pct_fus_trg_de_hom3, pct_fus_trg_all_hom3, 
+                 pct_fus_trg_de_ko, pct_fus_trg_all_ko),
+  dataset = c("HOM1", "HOM1",
+              "HOM3", "HOM3",
+              "KO", "KO")
+)
+
+max_y_pos_hom1 <- max(plot_data$percentage[plot_data$dataset == "HOM1"], na.rm = TRUE) + 1
+max_y_pos_hom3 <- max(plot_data$percentage[plot_data$dataset == "HOM3"], na.rm = TRUE) + 1
+max_y_pos_ko <- max(plot_data$percentage[plot_data$dataset == "KO"], na.rm = TRUE) + 1
+
+p1 <- plot_data %>% filter(dataset == "HOM3") %>% ggplot(aes(x = as.factor(category), 
+             y = percentage, fill = as.factor(category))) +
+    geom_bar(stat = "identity") +
+    xlab("") +
+    ylab("Percent of Fus-binding genes") +
+    facet_grid(~dataset, labeller = labeller(dataset = c(HOM3 = hom_label))) +
+    cowplot::theme_cowplot() +
+    ylim(0,21) +
+  guides(fill="none") +
+    scale_fill_manual(values = c("gray", purple_color)) +
+  annotate("text", x = 1.5, y = max_y_pos_hom3, 
+           label = paste("p =", formatC(fisher_test_hom3$p.value, 
+                                        format = "e", digits = 2)), hjust = 0.5)
+
+p2 <- plot_data %>% filter(dataset == "KO") %>% ggplot(aes(x = as.factor(category), 
+             y = percentage, fill = as.factor(category))) +
+    geom_bar(stat = "identity") +
+    xlab("") +
+    ylab("") +
+    ylim(0,21) +
+    facet_grid(~dataset, labeller = labeller(dataset = c(KO = ko_label))) +
+    cowplot::theme_cowplot() +
+  guides(fill="none") +
+    scale_fill_manual(values = c("gray", green_color)) +
+  annotate("text", x = 1.5, y = max_y_pos_ko, label = paste("p =", formatC(fisher_test_ko$p.value, format = "e", digits = 2)), hjust = 0.5)
+
+pct_de_genes <- p1 + p2
+pct_de_genes
+```
+
+## Volcano plot
+
+```{r}
+plot_volcano <- function(df_plot, title, color_non_target, color_target){
+  df_plot <- df_plot %>%
+    arrange(is_fus_target) %>%
+    mutate(case = case_when(
+      padj < p_cutoff & abs(log2FoldChange) > logfc_cutoff & is_fus_target ~ "Target",
+      padj < p_cutoff & abs(log2FoldChange) > logfc_cutoff &  !is_fus_target ~ "Non-target",
+      TRUE ~ "E"
+    ),
+  padj = case_when(
+  padj < 1e-20 ~ 1e-20,
+  T ~ padj
+  ))
+  
+  df_plot %>%
+    mutate(label = ifelse(row %in% c("Taf15","Ewsr1","Fus"), row, "" )) %>%
+    ggplot(aes(x = log2FoldChange, y = -log10(padj), label=label)) + 
+    geom_point(aes(colour = case,
+                   size = is_fus_target)) +
+    scale_size_manual(values = c(1, 1)) +
+    scale_colour_manual(values = c("Target" = color_target, 
+                                   "Non-target" = color_non_target, 
+                                   "E" = mixed_color)) +
+      cowplot::theme_cowplot() +
+    theme(axis.text = element_text(colour = "black")) +
+    guides(colour = "none", size = "none", shape="none") +
+    xlim(-1.5,1.5) + #ylim(-0.1,15) +
+    labs(y = expression(-Log[10]~P), x = expression(Log[2]~fold~change))
+}
+
+```
+
+```{r}
+hom1_volcano <- plot_volcano(hom1_res, paste("1 month", hom_label, "vs", wt_label), light_purple_color, purple_color)
+
+hom3_volcano <- plot_volcano(hom3_res, paste("3 months", hom_label, "vs", wt_label), light_purple_color, purple_color)
+
+ko_volcano <- plot_volcano(ko_res, paste("3 months", ko_label, "vs", wt_label), green_color, dark_green_color)
+```
+
+# overlap
+
+```{r}
+df1 <- hom3_res
+df2 <- ko_res
+filtered_df1 <- df1 %>%
+  filter(pvalue < 0.05)
+
+filtered_df2 <- df2 %>%
+  filter(pvalue < 0.05)
+
+# Find genes with padj < 0.05 in at least one dataframe
+genes_padj_lt_05 <- unique(c(
+  df1$row[df1$padj < 0.05],
+  df2$row[df2$padj < 0.05]
+))
+
+overlapping_genes <- intersect(
+  intersect(filtered_df1$row, filtered_df2$row),
+  genes_padj_lt_05
+)
+
+genes_padj_lt_05_df1 <- (df1 %>% filter(padj < 0.05))$row
+genes_padj_lt_05_df2 <- (df2 %>% filter(padj < 0.05))$row
+
+overlapping_genes <-  intersect(genes_padj_lt_05_df1, genes_padj_lt_05_df2)
+df1 %>% filter(padj < 0.05) %>%
+  filter(row %in% filtered_df2$row)
+
+venn_d <- draw.pairwise.venn(area1=length(genes_padj_lt_05_df1), area2=length(genes_padj_lt_05_df2),cross.area=length(overlapping_genes), category=c(hom_label,ko_label),fill=c("Red","Yellow"), lwd = 0, fontfamily = "sans", cat.fontfamily = "sans")
+```
+
+```{r}
+
+df1 <- hom3_res
+df2 <- ko_res
+
+all_genes <- union(df1$row, df2$row)
+
+sum_df <- tibble(row = all_genes) %>%
+  left_join(df1 %>% select(row, p1 = pvalue, padj1 = padj), by = "row") %>%
+  left_join(df2 %>% select(row, p2 = pvalue, padj2 = padj), by = "row") %>%
+  mutate(
+    sig1 = case_when(
+      !is.na(padj1) & padj1 < 0.05 ~ "padj<0.05",
+      (is.na(padj1) | padj1 >= 0.05) & !is.na(p1) & p1 < 0.05 ~ "p<0.05 only",
+      TRUE ~ "not sig"
+    ),
+    sig2 = case_when(
+      !is.na(padj2) & padj2 < 0.05 ~ "padj<0.05",
+      (is.na(padj2) | padj2 >= 0.05) & !is.na(p2) & p2 < 0.05 ~ "p<0.05 only",
+      TRUE ~ "not sig"
+    )
+  )
+
+deg_df <- sum_df %>%
+  filter(sig1 != "not sig" | sig2 != "not sig")
+
+heat_df <- deg_df %>%
+  dplyr::count(sig1, sig2)
+
+ggplot(heat_df, aes(x = sig1, y = sig2, fill = n)) +
+  geom_tile() +
+  geom_text(aes(label = n)) +
+  scale_fill_gradient(name = "N genes", low = "white", high = "steelblue") +
+  labs(
+    x = "hom3 status",
+    y = "KO status",
+    title = "Overlap of DEGs by significance type"
+  ) +
+  theme_classic()
+
+cat_df <- deg_df %>%
+  mutate(
+    category = case_when(
+      sig1 == "padj<0.05" & sig2 == "padj<0.05" ~ "padj both",
+      sig1 == "padj<0.05" & sig2 == "p<0.05 only" ~ "hom3 padj & KO p-only",
+      sig1 == "p<0.05 only" & sig2 == "padj<0.05" ~ "KO padj & hom3 p-only",
+      sig1 == "padj<0.05" & sig2 == "not sig" ~ "hom3 padj only",
+      sig1 == "not sig" & sig2 == "padj<0.05" ~ "KO padj only",
+      sig1 == "p<0.05 only" & sig2 == "not sig" ~ "hom3 p-only",
+      sig1 == "not sig" & sig2 == "p<0.05 only" ~ "KO p-only",
+      TRUE ~ "not sig in either"
+    )
+  ) %>%
+  dplyr::count(category) %>%
+  filter(category != "not sig in either") %>%
+  mutate(category = factor(category, levels = category[order(n, decreasing = TRUE)]))
+
+ggplot(cat_df, aes(x = category, y = n)) +
+  geom_col() +
+  geom_text(aes(label = n), vjust = -0.3, size = 3) +
+  labs(
+    x = NULL,
+    y = "Number of genes",
+    title = "DEG categories across hom3 and KO"
+  ) +
+  theme_classic() +
+  coord_flip()
+
+upset_df <- sum_df %>%
+  mutate(
+    hom3_padj   = if_else(!is.na(padj1) & padj1 < 0.05, 1L, 0L),
+    ko_padj     = if_else(!is.na(padj2) & padj2 < 0.05, 1L, 0L),
+    hom3_p_only = if_else(
+      (is.na(padj1) | padj1 >= 0.05) & !is.na(p1) & p1 < 0.05, 1L, 0L
+    ),
+    ko_p_only   = if_else(
+      (is.na(padj2) | padj2 >= 0.05) & !is.na(p2) & p2 < 0.05, 1L, 0L
+    )
+  ) %>%
+  filter(hom3_padj + ko_padj + hom3_p_only + ko_p_only > 0) %>%
+  select(hom3_padj, ko_padj, hom3_p_only, ko_p_only) %>%
+  as.data.frame()
+
+UpSetR::upset(
+  upset_df,
+  sets = c("hom3_padj", "ko_padj", "hom3_p_only", "ko_p_only"),
+  nsets = 4,
+  order.by = "freq",
+  mainbar.y.label = "Number of genes",
+  sets.x.label = "Genes per set"
+)
+
+```
+
+```{r}
+merged <- hom3_res %>%
+  dplyr::select(row,
+                p1    = pvalue,
+                padj1 = padj,
+                lfc1  = log2FoldChange) %>%
+  dplyr::full_join(
+    ko_res %>%
+      dplyr::select(row,
+                    p2    = pvalue,
+                    padj2 = padj,
+                    lfc2  = log2FoldChange),
+    by = "row"
+  )
+
+deg_df <- merged %>%
+  dplyr::mutate(
+    DE_hom3 = !is.na(p1) & p1 < 0.05,
+    DE_KO   = !is.na(p2) & p2 < 0.05
+  ) %>%
+  dplyr::filter(DE_hom3 | DE_KO) %>%
+  
+  dplyr::filter(
+    !(DE_hom3 & DE_KO &
+        !is.na(lfc1) & !is.na(lfc2) &
+        lfc1 * lfc2 < 0)
+  ) %>%
+  dplyr::mutate(
+    padj_status = dplyr::case_when(
+      !is.na(padj1) & padj1 < 0.05 &
+        !is.na(padj2) & padj2 < 0.05 ~ "padj both",
+      !is.na(padj1) & padj1 < 0.05 &
+        (is.na(padj2) | padj2 >= 0.05) ~ "padj hom3 only",
+      (is.na(padj1) | padj1 >= 0.05) &
+        !is.na(padj2) & padj2 < 0.05 ~ "padj KO only",
+      TRUE ~ "no padj"
+    ),
+    padj_status = factor(
+      padj_status,
+      levels = c("padj both", "padj hom3 only", "padj KO only", "no padj")
+    )
+  )
+
+
+
+```
+
+
+```{r}
+df1 <- hom3_res
+df2 <- ko_res
+
+all_genes <- union(df1$row, df2$row)
+
+sum_df <- tibble(row = all_genes) %>%
+  left_join(df1 %>% select(row, p1 = pvalue, padj1 = padj), by = "row") %>%
+  left_join(df2 %>% select(row, p2 = pvalue, padj2 = padj), by = "row") %>%
+  mutate(
+    sig1 = case_when(
+      !is.na(padj1) & padj1 < 0.05 ~ "padj<0.05",
+      (is.na(padj1) | padj1 >= 0.05) & !is.na(p1) & p1 < 0.05 ~ "p<0.05 only",
+      TRUE ~ "not sig"
+    ),
+    sig2 = case_when(
+      !is.na(padj2) & padj2 < 0.05 ~ "padj<0.05",
+      (is.na(padj2) | padj2 >= 0.05) & !is.na(p2) & p2 < 0.05 ~ "p<0.05 only",
+      TRUE ~ "not sig"
+    )
+  )
+
+# Only genes that are significant in at least one condition
+deg_df <- sum_df %>%
+  filter(sig1 != "not sig" | sig2 != "not sig")
+
+alluvial_df <- deg_df %>%
+  count(sig1, sig2, name = "n") %>%
+  mutate(
+    sig1 = factor(sig1, levels = c("padj<0.05", "p<0.05 only", "not sig")),
+    sig2 = factor(sig2, levels = c("padj<0.05", "p<0.05 only", "not sig"))
+  )
+
+ggplot(alluvial_df,
+       aes(y = n, axis1 = sig1, axis2 = sig2)) +
+  geom_alluvium(aes(fill = sig1), width = 0.25, alpha = 0.8) +
+  geom_stratum(width = 0.25, fill = "grey90", color = "grey40") +
+  geom_text(
+    stat = "stratum",
+    aes(label = paste(after_stat(stratum), "\n(n =", after_stat(count), ")")),
+    size = 3
+  ) +
+  scale_x_discrete(limits = c("hom3", "KO"), expand = c(0.1, 0.1)) +
+  labs(
+    x = NULL,
+    y = "Number of genes",
+    title = "Flows of genes between significance categories",
+    subtitle = "hom3 (left) → KO (right)"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+df1 <- hom1_res
+df2 <- hom3_res
+filtered_df1 <- df1 %>%
+  filter(pvalue < 0.05)
+
+filtered_df2 <- df2 %>%
+  filter(pvalue < 0.05)
+
+# Find genes with padj < 0.05 in at least one dataframe
+genes_padj_lt_05 <- unique(c(
+  df1$row[df1$padj < 0.05],
+  df2$row[df2$padj < 0.05]
+))
+
+overlapping_genes <- intersect(
+  intersect(filtered_df1$row, filtered_df2$row),
+  genes_padj_lt_05
+)
+
+genes_padj_lt_05_df1 <- (df1 %>% filter(padj < 0.05))$row
+genes_padj_lt_05_df2 <- (df2 %>% filter(padj < 0.05))$row
+
+venn_d_hom1 <- draw.pairwise.venn(area1=length(genes_padj_lt_05_df1), area2=length(genes_padj_lt_05_df2),cross.area=length(overlapping_genes), category=c(paste(hom_label, "1M"),paste(hom_label, "3M")),fill=c(light_purple_color,purple_color), lwd = 0, fontfamily = "sans", cat.fontfamily = "sans")
+```
+
+## correlation
+
+```{r}
+de_hom3_ko_merge <- merge(
+  hom3_res %>% select(row, log2FoldChange, padj),
+  ko_res %>% select(row, log2FoldChange, padj), 
+  by="row"
+)
+
+sig_threshold <- 0.05
+
+sig_x <- de_hom3_ko_merge$padj.x < sig_threshold & !is.na(de_hom3_ko_merge$padj.x) 
+sig_y <- de_hom3_ko_merge$padj.y < sig_threshold & !is.na(de_hom3_ko_merge$padj.y)  
+
+unique_x <- sum(sig_x & !sig_y, na.rm = TRUE)
+
+unique_y <- sum(sig_y & !sig_x, na.rm = TRUE)
+
+```
+
+```{r}
+colnames(de_hom3_ko_merge) <- c("Gene", "Log2FoldChange_HOM3", "Pvalue_HOM3", "Log2FoldChange_KO", "Pvalue_KO")
+
+de_hom3_ko_merge <- de_hom3_ko_merge %>% filter(Gene %in% overlapping_genes &
+                                                  Pvalue_HOM3 < 0.05 & Pvalue_KO < 0.05)
+de_hom3_ko_merge <- na.omit(de_hom3_ko_merge)
+
+de_hom3_ko_merge <- de_hom3_ko_merge %>%
+  mutate(case = case_when(
+  Log2FoldChange_KO > 0 & Log2FoldChange_HOM3 > 0 ~ "A",
+  Log2FoldChange_KO < 0 & Log2FoldChange_HOM3 > 0 ~ "B",
+  Log2FoldChange_KO > 0 & Log2FoldChange_HOM3 < 0 ~ "C",
+  Log2FoldChange_KO < 0 & Log2FoldChange_HOM3 < 0 ~ "D",
+  TRUE ~ "E"
+  ))
+highlight <- de_hom3_ko_merge %>% filter(abs(Log2FoldChange_HOM3) > 5 | abs(Log2FoldChange_KO) > 5) 
+table(de_hom3_ko_merge$case)
+
+mod1 <- (lm(de_hom3_ko_merge$Log2FoldChange_KO~ de_hom3_ko_merge$Log2FoldChange_HOM3))
+summary(mod1)
+
+coef(mod1)[2]
+corr_plot <- de_hom3_ko_merge %>%
+  mutate(label = ifelse(Gene %in% highlight$Gene, Gene, "" )) %>%
+  ggplot(aes(x = Log2FoldChange_HOM3, y = Log2FoldChange_KO, label = Gene)) + 
+  geom_point(aes(colour = case)) +
+  scale_colour_manual(values = c("A" = mixed_color, "B" = mixed_color, "C" = mixed_color, "D" = mixed_color, "E" = "gray")) +
+  geom_text_repel() +
+    cowplot::theme_cowplot() +
+  theme(axis.text = element_text(colour = "black")) +
+  guides(colour = "none") +
+  xlim(-2,2) +
+  ylim(-2,2) +
+  geom_smooth(method='lm',colour = "black") +
+  geom_abline(linetype=3) +
+  labs(
+  x = bquote(Log[2] ~ "fold change" ~ .(hom_label)~" 1M"),
+  y = bquote(Log[2] ~ "fold change" ~ .(hom_label)~" 3M")
+  , 
+       )+
+  geom_point(
+    data = filter(de_hom3_ko_merge, Log2FoldChange_KO < -2.5),
+    aes(fill = case,x = Log2FoldChange_HOM3, y = -2.5),
+    shape = 25,  
+    size = 3        # Triangle size
+  )+
+  guides(fill = "none") +
+  geom_text_repel(
+    data = filter(de_hom3_ko_merge, Log2FoldChange_KO < -2.5),
+    aes(x = Log2FoldChange_HOM3, y = -2.5, label = Gene),
+  ) 
+corr_plot
+```
+
+# FUS RNA
+
+```{r}
+flattenedAnnotation = exonicParts( txdb, linked.to.single.gene.only=TRUE )
+names(flattenedAnnotation) =
+    sprintf("%s:E%0.3d", flattenedAnnotation$gene_id, flattenedAnnotation$exonic_part)
+flattenedAnnotation_fus <- flattenedAnnotation[grepl("^ENSMUSG00000030795", names(flattenedAnnotation)), ]
+
+
+bamFiles = list.files(bam_dir, pattern=".bam$", full.names=TRUE)
+bamFiles = BamFileList( bamFiles, asMates=T )
+seqlevelsStyle(flattenedAnnotation_fus) = "UCSC"
+se = summarizeOverlaps(
+    flattenedAnnotation_fus, bamFiles, singleEnd=FALSE, fragments=T, mode="Union",
+    ignore.strand=TRUE ,
+    inter.feature = FALSE)
+exon_counts <- data.frame(se@assays@data$counts)
+```
+
+#IR
+
+```{r}
+intron_rows <- c(15, 16, 19, 20, 21)   # Rows corresponding to introns
+exon1_rows  <- c(14)                   # Row for exon 1
+exon2_rows  <- c(17, 18)                # Rows for exon 2
+exon3_rows  <- c(22)                    # Row for exon 3
+
+intron_counts <- colSums(exon_counts[intron_rows, ])
+exon_counts_total <- colSums(exon_counts[c(exon1_rows, exon2_rows, exon3_rows), ])
+
+IR_percent <- (intron_counts / (intron_counts + exon_counts_total)) * 100
+sample_conditions <- rep(c("HOM1", "HOM3"), each = 5)
+
+IR_df <- data.frame(
+    Sample = colnames(exon_counts),
+    Condition = sample_conditions,
+    IR_Percent = IR_percent
+)
+IR_df$IR_Percent <- c(1.96,1.4,1.44,1.55,1.63,1.31,1.8,1.4,1.32,1.29)
+ggplot(IR_df, aes(x = Condition, y = IR_Percent, fill = Condition)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.2, alpha = 0.6) +  # Add points
+  theme_minimal() +
+  ylim(0,2)+
+  labs(title = "",
+       y = "Intron Retention (FPKM)")
+
+```
+
+```{r}
+normalized_counts <- counts(dds, normalized=TRUE)
+fus_rna <- data.frame(expression = normalized_counts["Fus",],
+                      group = d14metadata$group)
+fus_rna <- fus_rna %>% filter(group %in% c("WT3", "HOM3"))
+fus_rna <- fus_rna %>% mutate(group = case_when(
+  group == "WT1" ~ "WT",
+  group == "WT3" ~ "WT",
+  group == "HOM1" ~ "HOM",
+  group == "HOM3" ~ "HOM",
+  group == "HET3" ~ "HET",
+  T ~ group
+))
+fus_rna$group <- factor(fus_rna$group, levels=c("WT1", "HET", "HOM1", "WT3", "HOM3", "WT", "HOM"))
+
+group_summary <- fus_rna %>%
+  group_by(group) %>%
+    summarise(mean_expr = mean(expression),
+            std_error = sd(expression) / sqrt(n()))
+
+fus_plot <- ggplot(group_summary, aes(x = group, y = mean_expr, fill=group)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_point(data = fus_rna, aes(x = group, y = expression), 
+             size = 2, color = "black") +
+  geom_errorbar(aes(ymin = mean_expr - std_error, ymax = mean_expr + std_error),
+                width = 0.2,                    
+                position = position_dodge(0.9)) +
+  geom_errorbar(aes(ymin = mean_expr - std_error, ymax = mean_expr + std_error),
+                width = 0.2,                   
+                position = position_dodge(0.9)) +
+  xlab("") +
+  ylab("Fus expression") +
+  coord_cartesian(ylim=c(000,7200))+
+  ggsci::scale_fill_nejm() +
+  ggsignif::geom_signif(
+    data=fus_rna,
+    aes(x = group, y = expression),
+  comparisons = list(
+    c("WT", "HOM")
+  ),
+  map_signif_level = T) +  
+  guides(fill = "none") +
+  scale_x_discrete(labels=c(wt_label, hom_label)) +
+  cowplot::theme_cowplot()
+```
+
+```{r}
+df_ir <- read.table("data/ir.txt",header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+df_selected <- df_ir %>%
+  select(Region, starts_with("D14_HOM3"), starts_with("D14_WT3"))
+
+df_long <- df_selected %>%
+  pivot_longer(cols = -Region, names_to = "Sample", values_to = "Value") %>%
+  mutate(Group = ifelse(grepl("D14_HOM3", Sample), "D14_HOM3", "D14_WT3"))
+
+df_summary <- df_long %>%
+  group_by(Region, Group) %>%
+  summarise(
+    Mean = mean(Value, na.rm = TRUE),
+    SE = sd(Value, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+stat_df <- df_long %>%
+  group_by(Region) %>%
+  summarise(
+    p = wilcox.test(Value ~ Group)$p.value,
+    y = max(Value, na.rm = TRUE) * 1.08,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_label = as.character(
+      symnum(
+        p,
+        cutpoints = c(0, 1e-4, 1e-3, 1e-2, 0.05, 1),
+        symbols = c("****","***","**","*","ns")
+      )
+    )
+  )
+df_long$Group <- factor(df_long$Group, levels=c("D14_WT3","D14_HOM3"))
+ir_barplot <- ggplot(df_long, aes(x = Group, y = Value, fill = Group)) +
+  geom_bar(
+    stat = "summary", fun = "mean",
+    position = position_dodge(width = 0.7), width = 0.65
+  ) +
+  geom_point(
+    position = position_dodge(width = 0.7),
+    size = 1.2, alpha = 0.9
+  ) +
+  facet_grid(~Region, scales = "free_y") +
+  labs(x = "", y = "Retention Level") +
+  scale_fill_manual(
+    values = c("D14_HOM3" = light_purple_color, "D14_WT3" = "grey")
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.position = "none",
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold")
+  ) +
+  geom_segment(
+    data = stat_df,
+    aes(x = 1, xend = 2, y = y, yend = y),
+    inherit.aes = FALSE,
+    linewidth = 0.5, 
+  ) +
+  geom_segment(
+  data = stat_df,
+  aes(x = 1, xend = 1, y = y, yend = y - 0.03 * y),
+  inherit.aes = FALSE,
+  linewidth = 0.5
+) +
+geom_segment(
+  data = stat_df,
+  aes(x = 2, xend = 2, y = y, yend = y - 0.03 * y),
+  inherit.aes = FALSE,
+  linewidth = 0.5
+)+
+  geom_text(
+    data = stat_df,
+    aes(x = 1.5, y = y, label = p_label),
+    inherit.aes = FALSE,
+    vjust = -0.4,
+    fontface = "bold",
+    size = 4
+  )
+
+ir_barplot
+```
+
+# GO analysis
+
+```{r}
+de_gene_hom1 <- hom1_res %>% filter(padj < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.)
+go_hom1 <- enrichGO(gene = de_gene_hom1, 
+                universe = hom1_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "ALL",
+                minGSSize = 10,
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+
+barplot(go_hom1, showCategory = 15)
+go_hom1@result
+```
+
+```{r}
+hom1_terms <- read.csv("data/go/go_hom1_clean.csv")
+hom3_terms <- read.csv("data/go/go_hom3_clean.csv")
+ko_terms <- read.csv("data/go/go_ko_clean.csv")
+majiq_ko_terms <- read.csv("data/go/go_splicing_ko_clean.csv")
+majiq_hom3_terms <- read.csv("data/go/go_splicing_hom3_clean.csv")
+
+terms_to_keep <- hom1_terms$Description
+go_hom1@result <- go_hom1@result %>%
+  filter(Description %in% terms_to_keep)
+barplot(go_hom1, showCategory = 15) +
+  scale_fill_gradient(
+    low = "orangered3",
+    high = "steelblue3",
+    trans = "log10",
+    name = "p.adjust"
+  )
+
+de_gene_hom3 <- hom3_res %>% filter(padj < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.)
+go_hom3 <- enrichGO(gene = de_gene_hom3, 
+                universe = hom3_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+
+barplot(go_hom3, showCategory = 15)
+go_hom3@result
+```
+
+```{r}
+
+terms_to_keep <- hom3_terms$Description
+go_hom3@result <- go_hom3@result %>%
+  filter(Description %in% terms_to_keep)
+barplot(go_hom3, showCategory = 15)
+```
+
+```{r}
+de_gene_ko <- ko_res %>% filter(padj < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.)
+go_ko <- enrichGO(gene = de_gene_ko,
+                universe = ko_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+go_hom3_terms <- go_hom3@result %>% filter(p.adjust < 0.05 & qvalue <0.05)
+go_ko_terms <- go_ko@result %>% filter(p.adjust < 0.05 & qvalue <0.05)
+barplot(go_hom3, showCategory = 15) + barplot(go_ko, showCategory = 15)
+```
+
+```{r}
+de_gene_hom3_uniq <- setdiff(hom3_res %>% filter(padj < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.), 
+                             ko_res %>% filter(pvalue < p_cutoff) %>% .[,"row"] %>% as.vector(.))
+
+go_hom3_uniq <- enrichGO(gene = de_gene_hom3_uniq,
+                universe = hom3_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+go_hom3_terms <- go_hom3_uniq@result %>% filter(p.adjust < 0.05 & qvalue <0.05)
+go_ko_terms <- go_ko@result %>% filter(p.adjust < 0.05 & qvalue <0.05)
+barplot(go_hom3_uniq, showCategory = 15)
+```
+
+```{r}
+terms_to_keep <- c(
+  "synaptic vesicle cycle",
+  "chemical synaptic transmission, postsynaptic",
+  "vesicle-mediated transport in synapse",
+  "central nervous system neuron development"
+)
+go_hom3_uniq1<-go_hom3_uniq
+go_hom3_uniq1@result <- go_hom3_uniq@result %>%
+  filter(Description %in% terms_to_keep)
+barplot(go_hom3_uniq1, showCategory = 15)
+```
+
+```{r}
+df1 <- hom3_res
+df2 <- ko_res
+filtered_df1 <- df1 %>%
+  filter(pvalue < 0.05)
+
+filtered_df2 <- df2 %>%
+  filter(pvalue < 0.05)
+
+# Find genes with padj < 0.05 in at least one dataframe
+genes_padj_lt_05 <- unique(c(
+  df1$row[df1$padj < 0.05],
+  df2$row[df2$padj < 0.05]
+))
+
+overlapping_genes <- intersect(
+  intersect(filtered_df1$row, filtered_df2$row),
+  genes_padj_lt_05
+)
+
+genes_padj_lt_05_df1 <- (df1 %>% filter(padj < 0.05))$row
+genes_padj_lt_05_df2 <- (df2 %>% filter(padj < 0.05))$row
+
+de_gene_common <- intersect(
+  intersect(filtered_df1$row, filtered_df2$row),
+  genes_padj_lt_05
+)
+
+go_common <- enrichGO(gene = de_gene_common,
+                universe = intersect(ko_res$row, hom3_res$row),
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+
+barplot(go_common, showCategory = 15) 
+```
+
+```{r}
+terms_to_keep <- c(
+  "cytoplasmic translation",
+  "ribonucleoprotein complex biogenesis",
+  "protein-RNA complex organization",
+  "ribosome biogenesis",
+  "RNA splicing",
+  "mRNA processing",
+  "dendrite development"
+)
+
+go_common@result <- go_common@result %>%
+  filter(Description %in% terms_to_keep)
+barplot(go_common, showCategory = 15)
+```
+
+```{r}
+de_gene_ko_uniq <- setdiff(de_gene_ko, 
+                             hom3_res %>% filter(pvalue < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.))
+
+go_ko_uniq <- enrichGO(gene = de_gene_ko_uniq,
+                universe = ko_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+go_hom3_terms <- go_hom3@result %>% filter(p.adjust < 0.05 & qvalue <0.05)
+go_ko_terms <- go_ko@result %>% filter(p.adjust < 0.05 & qvalue <0.05)
+barplot(go_ko_uniq, showCategory = 15) 
+```
+
+```{r}
+terms_to_keep <- c(
+  "nuclear division",
+  "chromosome segregation",
+  "positive regulation of protein kinase activity",
+  "regulation of nuclear division"
+)
+go_ko_uniq@result <- go_ko_uniq@result %>%
+  filter(Description %in% terms_to_keep)
+barplot(go_ko_uniq, showCategory = 15)
+```
+
+#GO 1m vs 3m
+
+```{r}
+df1 <- hom3_res
+df2 <- hom1_res
+
+filtered_df1 <- df1 %>%
+  filter(pvalue < 0.05)
+
+filtered_df2 <- df2 %>%
+  filter(pvalue < 0.05)
+
+genes_padj_lt_05 <- unique(c(
+  df1$row[df1$padj < 0.05],
+  df2$row[df2$padj < 0.05]
+))
+
+de_gene_hom_common <- intersect(
+  intersect(filtered_df1$row, filtered_df2$row),
+  genes_padj_lt_05
+)
+```
+
+```{r}
+go_hom_common <- enrichGO(gene = de_gene_hom_common,
+                universe = hom1_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+```
+
+```{r}
+de_gene_hom1_uniq <- setdiff(de_gene_hom1, 
+                             hom3_res %>% filter(pvalue < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.))
+
+go_hom1_uniq <- enrichGO(gene = de_gene_hom1_uniq,
+                universe = hom1_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+
+terms_to_keep <- c(
+  "fatty acid metabolic process",
+  "fatty acid oxidation",
+  "generation of precursor metabolites and energy",
+  "muscle cell development",
+  "regulation of lipid metabolic process",
+  "muscle cell differentiation",
+  "regulation of transmembrane transport"
+)
+
+go_hom1_uniq@result <- go_hom1_uniq@result %>%
+  filter(Description %in% terms_to_keep)
+barplot(go_hom1_uniq, showCategory = 15)
+```
+
+```{r}
+de_gene_hom3_uniq <- setdiff(de_gene_hom3, 
+                             hom1_res %>% filter(pvalue < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.))
+
+go_hom3_uniq <- enrichGO(gene = de_gene_hom3_uniq,
+                universe = hom3_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+
+terms_to_keep <- c(
+  "cytoplasmic translation",
+  "synaptic vesicle cycle",
+  "protein localization to cell periphery",
+  "ribonucleoprotein complex biogenesis",
+  "ribosome biogenesis",
+  "negative regulation of cell projection organization",
+  "regulation of organelle assembly"
+)
+
+go_hom3_uniq@result <- go_hom3_uniq@result %>%
+  filter(Description %in% terms_to_keep)
+barplot(go_hom3_uniq, showCategory = 15)
+
+```
+
+#sankey plot
+
+```{r}
+
+df1 <- hom1_res
+df2 <- hom3_res
+
+all_genes <- union(df1$row, df2$row)
+
+sum_df <- tibble(row = all_genes) %>%
+  left_join(df1 %>% select(row, p1 = pvalue, padj1 = padj), by = "row") %>%
+  left_join(df2 %>% select(row, p2 = pvalue, padj2 = padj), by = "row") %>%
+  mutate(
+    sig1 = case_when(
+      !is.na(padj1) & padj1 < 0.05 ~ "padj<0.05",
+      (is.na(padj1) | padj1 >= 0.05) & !is.na(p1) & p1 < 0.05 ~ "p<0.05 only",
+      TRUE ~ "not sig"
+    ),
+    sig2 = case_when(
+      !is.na(padj2) & padj2 < 0.05 ~ "padj<0.05",
+      (is.na(padj2) | padj2 >= 0.05) & !is.na(p2) & p2 < 0.05 ~ "p<0.05 only",
+      TRUE ~ "not sig"
+    )
+  )
+
+overlap_both <- sum_df %>%
+  filter(!is.na(p1), !is.na(p2),
+         p1 < 0.05,
+         p2 < 0.05) %>%
+  mutate(
+    sig1_overlap = if_else(!is.na(padj1) & padj1 < 0.05,
+                           "hom3 padj < 0.05",
+                           "hom3 p < 0.05 only"),
+    sig2_overlap = if_else(!is.na(padj2) & padj2 < 0.05,
+                           "KO padj < 0.05",
+                           "KO p < 0.05 only")
+  ) %>%
+  count(sig1_overlap, sig2_overlap, name = "n")
+
+sankey_plot <- ggplot(overlap_both,
+       aes(y = n,
+           axis1 = sig1_overlap,
+           axis2 = sig2_overlap)) +
+  geom_alluvium(aes(fill = sig1_overlap), width = 0.25, alpha = 0.8) +
+  geom_stratum(width = 0.25, fill = "grey90", color = "grey40") +
+  geom_text(
+    stat = "stratum",
+    aes(label = paste(after_stat(stratum), "\n(n =", after_stat(count), ")")),
+    size = 3
+  ) +
+  scale_x_discrete(limits = c("hom3", "KO"), expand = c(0.1, 0.1)) +
+  labs(
+    x = NULL,
+    y = "Number of genes",
+    title = "DEGs with p < 0.05 in both conditions",
+    subtitle = "Flow between padj-significant and p-only categories"
+  ) +
+  theme_minimal()
+
+sankey_plot
+```
+
+```{r}
+deg_df <- sum_df %>%
+  filter(sig1 != "not sig" | sig2 != "not sig")
+
+alluvial_df <- deg_df %>%
+  count(sig1, sig2, name = "n") %>%
+  mutate(
+    sig1 = factor(sig1, levels = c("padj<0.05", "p<0.05 only", "not sig")),
+    sig2 = factor(sig2, levels = c("padj<0.05", "p<0.05 only", "not sig"))
+  )
+
+p<-ggplot(alluvial_df,
+       aes(y = n, axis1 = sig1, axis2 = sig2, label=n)) +
+  geom_alluvium(aes(fill = sig1), width = 0.25, alpha = 0.8) +
+  geom_stratum(width = 0.25, fill = "grey90", color = "grey40") +
+  geom_text(
+    stat = "stratum",
+    aes(label = paste(after_stat(stratum), "\n(n =", after_stat(count), ")")),
+    size = 3
+  ) +
+  geom_text(stat = "flow", nudge_x = 0.2, size = 2.5) +
+  scale_x_discrete(limits = c("1M", "3M"), expand = c(0.1, 0.1)) +
+  labs(
+    x = NULL,
+    y = "Number of genes",
+    title = "Flows of genes between significance categories",
+    subtitle = "1M (left) → 3M (right)"
+  ) +
+  theme_minimal(base_family = "Helvetica", base_size = 12)
+
+p
+```
+
+```{r}
+ko_sig <- ko_res %>%
+  filter(pvalue < p_cutoff, abs(log2FoldChange) > logfc_cutoff) %>%
+  pull(row) %>% unique()
+
+# 2) build ranked vector for GSEA from HOM3 results
+# Prefer the DESeq2 'stat' (Wald score). If absent, fall back to signed -log10(p)
+if (!"stat" %in% names(hom3_res)) {
+  hom3_res <- hom3_res %>%
+    mutate(stat = sign(log2FoldChange) * -log10(pvalue + 1e-300))
+}
+
+gene_ranks <- hom3_res %>%
+  filter(!is.na(stat), !is.na(row), row != "") %>%
+  filter(!(row %in% ko_sig)) %>%
+  group_by(row) %>%
+  summarize(stat = stat[which.max(abs(stat))], .groups = "drop") %>%
+  arrange(desc(stat))
+
+geneList <- gene_ranks$stat
+names(geneList) <- gene_ranks$row
+
+gsea_hom3_uniq <- gseGO(
+  geneList     = geneList,
+  OrgDb        = org.Mm.eg.db,
+  keyType      = "SYMBOL",
+  ont          = "BP",
+  pAdjustMethod= "BH",
+  minGSSize    = 10,
+  maxGSSize    = 1000,
+  eps          = 0,        # exact p-values
+  verbose      = FALSE
+)
+
+gsea_hom3_sig <- as.data.frame(gsea_hom3_uniq) %>%
+  filter(p.adjust < 0.05)
+
+dotplot(gsea_hom3_uniq, showCategory = 20)
+
+ridgeplot(gsea_hom3_uniq, showCategory = 15)
+
+gseaplot2(gsea_hom3_uniq, geneSetID = gsea_hom3_sig$ID[1], pvalue_table = TRUE)
+```
+
+```{r}
+
+gene_ranks <- hom3_res %>%
+  filter(!is.na(stat), !is.na(row), row != "") %>%
+  filter(!(row %in% ko_sig)) %>%
+  group_by(row) %>%
+  summarize(stat = stat[which.max(abs(stat))], .groups = "drop") %>%
+  arrange(desc(stat))
+
+geneList <- gene_ranks$stat
+names(geneList) <- gene_ranks$row
+
+gsea_hom3_uniq <- gseGO(
+  geneList      = geneList,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  minGSSize     = 10,
+  maxGSSize     = 1000,
+  eps           = 0,        # exact p-values
+  verbose       = FALSE
+)
+
+gsea_hom3_sig <- as.data.frame(gsea_hom3_uniq) %>%
+  filter(p.adjust < 0.05)
+
+gsea_hom3_easy <- importCP(gsea_hom3_uniq, type = "gsea")
+
+plotGSEA(
+  gsea_hom3_easy,
+  plot_type    = "bar",    
+  stats_metric = "p.adjust",
+  show_pathway = 20,         
+  main_text_size   = 10,
+  legend_text_size = 8
+)
+
+```
+
+# Cryptic
+
+## Parse MAJIQ
+```{r}
+prob_cutoff <- 0.9
+dpsi_cutoff = 0.05
+
+parse_majiq <- function(control, kd, only_cryptic) {
+  ref_psi_col <- paste0(tolower(control), "_mean_psi")
+  kd_psi_col <- paste0(tolower(control), "_mean_psi")
+  dpsi_col <- paste0(kd, ".", control, "_median_dpsi")
+  df_majiq <- read.csv(paste0('data/delta_psi_voila_tsv/', control, "-", kd, "_annotated_junctions.csv"))
+  df_majiq <- dplyr::rename(df_majiq,
+                     refPSI=ref_psi_col, deltaPSI="mean_dpsi_per_lsv_junction") 
+  
+  df_majiq <- df_majiq %>% dplyr::filter(probability_non_changing < p_cutoff 
+                                         & probability_changing > prob_cutoff
+                                         #& event_changing == "True"
+                                         & gene_name != "" 
+                                         & abs(deltaPSI) >= dpsi_cutoff)
+
+  if (only_cryptic == T) {
+    df_majiq <- df_majiq %>% dplyr::filter(refPSI <= 0.05 | refPSI >= 0.9)
+    df_majiq_skip <- df_majiq_skip %>% dplyr::filter(refPSI >= 0.8)
+  }
+
+    return(df_majiq)
+}
+
+```
+
+```{r}
+only_cryptic = F
+df_majiq_hom3 <- parse_majiq("WT3", "HOM3", only_cryptic)
+df_majiq_ko <- parse_majiq("KO_WT", "KO_HOM", only_cryptic)
+```
+
+## Volcano plot
+
+```{r}
+plot_majiq <- function(df_majiq, title){
+df_majiq <- df_majiq %>%
+  mutate(case = case_when(
+  refPSI < 0.05 | refPSI > 0.95 ~ "Cryptic",
+  T ~ "Alternative splicing",
+  ),
+  padjust = case_when(
+  probability_non_changing < 1e-6 ~ 1e-6,
+  T ~ probability_non_changing,
+  ))
+table(df_majiq$case)
+highlight <- c("Fus", "Taf15", "Trov2", "Ewsr1")
+
+df_majiq <- df_majiq %>%
+  filter(junc_cat!="none")%>%
+  group_by(paste_into_igv_junction) %>%
+  slice_max(order_by = abs(deltaPSI), with_ties = FALSE) %>%
+  ungroup() %>%
+  group_by(lsv_id) %>%
+  slice_max(order_by = abs(deltaPSI), with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(label = ifelse(gene_name %in% highlight, gene_name, "" )) 
+df_majiq %>%
+  ggplot(aes(x = abs(deltaPSI), y = -log10(padjust), label = label)) + 
+  geom_point(aes(colour = case), size=1) +
+  scale_colour_manual(values = c( "lightpink", "navy", "gray" ), name = "Event") +
+  cowplot::theme_cowplot() + 
+  theme(axis.text = element_text(colour = "black")) +
+  guides(colour = "none") +
+  xlim(0, 0.9) + 
+  geom_text_repel(aes(label = as.character(label)), max.overlaps = 30) +
+  labs(y = expression(-Log[10]~P), x = expression(Delta~PSI))
+}
+```
+
+```{r}
+majiq_hom3 <- plot_majiq(df_majiq_hom3, "")
+majiq_ko <- plot_majiq(df_majiq_ko, "")
+df_majiq_hom3 %>% filter(gene_name == "Fus")
+df_majiq_ko %>% filter(gene_name == "Fus")
+plot_majiq(df_majiq_hom3, "")
+```
+
+## GO analysis
+
+```{r}
+go_majiq_hom3 <- enrichGO(gene = unique(df_majiq_hom3$gene_name), 
+                universe = hom3_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "ALL",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+
+barplot(go_majiq_hom3, showCategory = 15)
+```
+
+```{r}
+go_majiq_ko <- enrichGO(gene = unique(df_majiq_ko$gene_name), 
+                universe = ko_res$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "ALL",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05)
+
+barplot(go_majiq_ko, showCategory = 15)
+```
+
+## go plots
+
+```{r}
+hom1_terms <- read.csv("data/go/go_hom1_clean.csv")
+hom3_terms <- read.csv("data/go/go_hom3_clean.csv")
+ko_terms <- read.csv("data/go/go_ko_clean.csv")
+majiq_ko_terms <- read.csv("data/go/go_splicing_ko_clean.csv")
+majiq_hom3_terms <- read.csv("data/go/go_splicing_hom3_clean.csv")
+
+go_ko@result <- ko_terms %>% arrange(p.adjust)
+barplot(go_ko, showCategory = 22)+
+  scale_fill_gradient(
+    low = "orangered3",
+    high = "steelblue3",
+    trans = "log10",
+    name = "p.adjust"
+  )
+
+go_hom1@result <- hom1_terms %>% arrange(p.adjust)
+barplot(go_hom1, showCategory = 22)+
+  scale_fill_gradient(
+    low = "orangered3",
+    high = "steelblue3",
+    trans = "log10",
+    name = "p.adjust"
+  )
+
+go_hom3@result <- hom3_terms %>% arrange(p.adjust)
+barplot(go_hom3, showCategory = 22)+
+  scale_fill_gradient(
+    low = "orangered3",
+    high = "steelblue3",
+    trans = "log10",
+    name = "p.adjust"
+  )
+
+go_majiq_hom3@result <- majiq_hom3_terms %>% arrange(p.adjust)
+barplot(go_majiq_hom3, showCategory = 22,
+  orderBy = "p.adjust")+
+  scale_fill_gradient(
+    low = "orangered3",
+    high = "steelblue3",
+    trans = "log10",
+    name = "p.adjust"
+  )
+
+go_majiq_ko@result <- majiq_ko_terms %>% arrange(p.adjust)
+barplot(go_majiq_ko, showCategory = 22)+
+  scale_fill_gradient(
+    low = "orangered3",
+    high = "steelblue3",
+    trans = "log10",
+    name = "p.adjust"
+  )
+```
+
+## correlation
+```{r}
+df_majiq_mrg <- merge(
+  df_majiq_hom3 %>% select(gene_name, lsv_id, deltaPSI),
+  df_majiq_ko %>% select(gene_name, lsv_id, deltaPSI), 
+  by="lsv_id"
+)
+colnames(df_majiq_mrg) <- c("lsv_id", "Gene",  "deltaPSI_HOM3", "Gene2", "deltaPSI_KO")
+
+df_majiq_mrg <- na.omit(df_majiq_mrg)
+
+df_majiq_mrg <- df_majiq_mrg %>%
+  mutate(case = case_when(
+  deltaPSI_HOM3 > 0 & deltaPSI_KO > 0 ~ "A",
+  deltaPSI_HOM3 < 0 & deltaPSI_KO > 0 ~ "B",
+  deltaPSI_HOM3 > 0 & deltaPSI_KO < 0 ~ "C",
+  deltaPSI_HOM3 < 0 & deltaPSI_KO < 0 ~ "D",
+  TRUE ~ "E"
+  ))
+df_majiq_mrg <- df_majiq_mrg %>% distinct(Gene, case, .keep_all = T)
+table(df_majiq_mrg$case)
+
+mod1 <- (lm(df_majiq_mrg$deltaPSI_HOM3~ df_majiq_mrg$deltaPSI_KO))
+summary(mod1)
+
+coef(mod1)[2]
+
+majiq_mrg <- df_majiq_mrg %>%
+  ggplot(aes(x = deltaPSI_HOM3, y = deltaPSI_KO, label = Gene)) + 
+  geom_point(aes(color = case)) +
+  scale_colour_manual(values = c( "red", "black", "black", "dodgerblue3", "gray" )) +
+  geom_text_repel() +
+  cowplot::theme_cowplot() + 
+  theme(axis.text = element_text(colour = "black")) +
+  guides(colour = "none") +
+  geom_hline(yintercept = 0, linetype="dashed", colour="lightgray") +
+  geom_vline(xintercept = 0, linetype="dashed", colour="lightgray") +
+  xlab(paste(hom_label, "∆PSI")) +
+  ylab(paste(ko_label, "∆PSI")) +
+  xlim(-0.4,0.4) + 
+  ylim(-0.4,0.4) +
+  labs(title = "")
+```
+
+# Ribo-seq
+
+## Kallisto
+
+```{r}
+
+ribotag_data <- read.csv("data/ribotag_sample_sheet.csv")
+files <- paste0(ribo_counts_dir, ribotag_data$sample_name, "_featureCounts_results.txt")
+names(files) = c(ribotag_data$sample_name)
+ribotag_data$condition <- relevel(as.factor(ribotag_data$condition), ref = "WT")
+ribotag_data$type <- relevel(as.factor(ribotag_data$type), ref = "input")
+
+```
+
+```{r}
+convert_first_line_as_names<- function(x){names(x) <- as.matrix(x[1, ])
+                                          x<-x[-1, ]
+                                          x[] <- lapply(x,function(y) type.convert(as.character(y)))
+                                          x <- as.data.frame(x)}
+
+RNAfiles <- lapply(files,function(x) {read.delim(x, header = F, sep ="\t",dec=".")})
+
+RNAfile_table <- lapply(RNAfiles, function(x){x[-1, ]}) %>% 
+                                     lapply(convert_first_line_as_names)%>%
+                                     lapply(function(x){x[ ,c(7,8)]})
+```
+
+```{r}
+Final_RNAfile <- RNAfile_table
+for (i in c(1:length(Final_RNAfile))){
+  col <- colnames(Final_RNAfile[[i]])[2]
+ col <- str_remove(col,pattern="/SAN/vyplab/FUS_RNA/AGA_RIBOSEQ_FUS_MOUSE_ADULT/STAR_aligned/")
+ col <- str_remove(col,pattern=".Aligned.sorted.out.bam")
+ colnames(Final_RNAfile[[i]])[2] <- col
+ Final_RNAfile[[i]] <- Final_RNAfile[[i]][!duplicated(Final_RNAfile[[i]]$gene_name), ]
+ }
+```
+
+```{r}
+result_table<- purrr::reduce(Final_RNAfile,full_join, by="gene_name")
+dds <- DESeqDataSetFromMatrix(countData = result_table,
+                             colData = ribotag_data,
+                             design = ~group,
+                             tidy=TRUE)
+keep_dds <- rowMeans(counts(dds)) >= 2
+dds <- dds[keep_dds,]
+dds <- DESeq(dds)
+resultsNames(dds)
+normalized_counts_adult <- counts(dds, normalized = TRUE)
+df_deseq <- results(dds, tidy=T)
+df_deseq_input <- results(dds, contrast=c("group","hom_input","wt_input"), tidy = T)
+df_deseq_ip <- results(dds, contrast=c("group","hom_ip","wt_ip"), tidy = T)
+
+df_deseq$trans.eff.Ribotag.DESeq <- 2^(df_deseq$log2FoldChange)
+df_deseq$is_fus_target <- df_deseq$row %in% fus_target_l_fdr
+df_deseq$is_fmrp_target <- df_deseq$row %in% fmrp_target
+
+df_deseq$targets <- ifelse(df_deseq$row %in% fmrp_target,
+    ifelse(df_deseq$row %in% fus_target_l_fdr, "Both", "FMRP"),
+    ifelse(df_deseq$row %in% fus_target_l_fdr, "FUS", "None"))
+
+```
+
+## Embryo
+
+```{r}
+k <- AnnotationDbi::keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, k, "GENEID", "TXNAME")
+tx2gene$TXNAME <- gsub("\\..*","",tx2gene$TXNAME)
+tx2gene$GENEID <- gsub("\\..*","",tx2gene$GENEID)
+tx2gene$ENSEMBL <- tx2gene$GENEID
+annots <- data.table(AnnotationDbi::select(org.Mm.eg.db, keys = AnnotationDbi::keys(org.Mm.eg.db,keytype = "SYMBOL"), columns = c("ENSEMBL", "SYMBOL"), keytype = "SYMBOL"))
+tx2genename <- merge(tx2gene, annots, by="ENSEMBL")
+tx2genename <- tx2genename[,c("TXNAME", "SYMBOL")]
+coding <- readLines("data/gencode.vM22.coding.txt")
+coding <- gsub("\\..*","",coding)
+tx2genename <- tx2genename[tx2genename$TXNAME %in% coding,]
+```
+
+```{r}
+ribo_embryo_csv <- read.table("data/KallistoResultsEmbryo/fus_support.txt", header = T)
+ribo_embryo_csv <- read.table("data/KallistoResultsEmbryo/FUSSupportFixedNames.txt", header = T)
+ribo_embryo_csv$condition_A <- relevel(as.factor(ribo_embryo_csv$condition_A), ref = "input")
+ribo_embryo_csv$condition_B <- relevel(as.factor(ribo_embryo_csv$condition_B), ref = "WT")
+
+ribo_embryo_csv <- ribo_embryo_csv %>%
+  mutate(condition_B = coalesce(condition_B, condition_C, condition_D, condition_E))
+
+files <- paste0(ribo_embryo_dir, ribo_embryo_csv$f1, "-aligned/abundance.tsv")
+names(files) = c(ribo_embryo_csv$sample)
+txi.kallisto.tsv <- tximport(files, type = "kallisto", tx2gene = tx2genename, ignoreAfterBar = TRUE, ignoreTxVersion = TRUE, dropInfReps = TRUE)
+```
+
+```{r}
+ribo_embryo_csv$group <- paste(ribo_embryo_csv$condition_A, ribo_embryo_csv$condition_B, sep="_")
+dds <- DESeqDataSetFromTximport(txi.kallisto.tsv,
+                                colData = ribo_embryo_csv,
+                                design = ~group
+                                )
+keep_dds <- rowSums(counts(dds)) >= 10
+dds <- dds[keep_dds,]
+dds <- DESeq(dds)
+normalized_counts_embryo <- counts(dds, normalized = TRUE)
+
+df_deseq_embryo_input <- results(dds, contrast=c("group","input_D14","input_WT"), tidy=T)
+df_deseq_embryo_ip <- results(dds, contrast=c("group","IP_D14","IP_WT"), tidy=T)
+
+df_deseq_embryo <- results(dds, tidy=T)
+df_deseq_embryo$trans.eff.Ribotag.DESeq <- 2^(df_deseq_embryo$log2FoldChange)
+df_deseq_embryo$is_fus_target <- ifelse(df_deseq_embryo$row %in% fus_target_l_fdr, "Yes", "No")
+df_deseq_embryo$is_fmrp_target <- ifelse(df_deseq_embryo$row %in% fmrp_target, "Yes", "No")
+df_deseq_embryo$targets <- ifelse(df_deseq_embryo$row %in% fmrp_target,
+                            ifelse(df_deseq_embryo$row %in% fus_target_l_fdr, "Both", "FMRP"),
+                            ifelse(df_deseq_embryo$row %in% fus_target_l_fdr, "FUS", "None"))
+
+```
+
+
+## Volcano plot
+```{r}
+ribotag_data$group <- relevel(as.factor(ribotag_data$group), ref = "wt_input")
+dds <- DESeqDataSetFromMatrix(countData = subset(result_table, select=gene_name:input_WT_5),
+                             colData = ribotag_data %>% filter(type == "input"),
+                             design = ~group,
+                             tidy=TRUE)
+
+keep_dds <- rowSums(counts(dds)) >= 10
+dds <- dds[keep_dds,]
+dds <- DESeq(dds)
+normalized_counts_input <- counts(dds, normalized=TRUE)
+df_deseq_input <- results(dds, tidy = TRUE)
+
+df_deseq_input$is_fus_target <- df_deseq_input$row %in% fus_target_l_fdr
+df_deseq_input$is_fmrp_target <- df_deseq_input$row %in% fmrp_target
+
+df_deseq_ip$is_fus_target <- df_deseq_ip$row %in% fus_target_l_fdr
+df_deseq_ip$is_fmrp_target <- df_deseq_ip$row %in% fmrp_target
+
+```
+
+```{r}
+plot_volcano2 <- function(df_plot){
+  df_plot <- df_plot %>%
+    mutate(case = case_when(
+      padj < p_cutoff & log2FoldChange > logfc_cutoff & is_fus_target ~ "A",
+      padj < p_cutoff & log2FoldChange > logfc_cutoff & !is_fus_target ~ "B",
+      padj < p_cutoff & log2FoldChange < -logfc_cutoff & is_fus_target ~ "C",
+      padj < p_cutoff & log2FoldChange < -logfc_cutoff & !is_fus_target ~ "D",
+      TRUE ~ "E"
+    ))
+table(df_plot$case)
+df_plot$padj_capped <- pmax(1e-20, df_plot$padj)
+df_plot %>%
+  mutate(label = ifelse(row %in% c("ыTaf15","ыEwsr1"), row, "" )) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj_capped), label=label)) + 
+  geom_point(aes(colour = case,
+                 size = is_fus_target)) +
+  scale_size_manual(values = c(1.2,1.2)) +
+  geom_text()+
+  scale_colour_manual(values = c("A" = purple_color, "B" = light_purple_color, "C" = purple_color, "D" = light_purple_color, "E" = "gray")) +
+  cowplot::theme_cowplot() + 
+  theme(axis.text = element_text(colour = "black")) +
+  guides(colour = "none", size = "none", shape="none") +
+  xlim(-1.95,1.95) + 
+  labs(y = expression(-Log[10]~P), x = expression(Log[2]~fold~change))
+}
+ribo_volcano <- plot_volcano2(df_deseq_ip)
+```
+
+```{r}
+logfc_cutoff_ribo <- 0.5
+de_gene_ip <- df_deseq_ip %>% filter(padj < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff_ribo) %>% .[,"row"] %>% as.vector(.)
+go_ribo <- enrichGO(gene = de_gene_ip, 
+                universe = df_deseq_ip$row,
+                OrgDb    = org.Mm.eg.db,
+                keyType  = 'SYMBOL',
+                ont           = "ALL",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.1,
+                qvalueCutoff  = 0.1)
+
+barplot(go_ribo, showCategory = 15)
+```
+
+```{r}
+fdr_cutoff <- 0.1
+  df_deseq_input <- df_deseq_input %>%
+    mutate(case = case_when(
+      padj < fdr_cutoff & log2FoldChange > logfc_cutoff_ribo & is_fus_target ~ "A",
+      padj < fdr_cutoff & log2FoldChange > logfc_cutoff_ribo & !is_fus_target ~ "B",
+      padj < fdr_cutoff & log2FoldChange < -logfc_cutoff_ribo & is_fus_target ~ "C",
+      padj < fdr_cutoff & log2FoldChange < -logfc_cutoff_ribo & !is_fus_target ~ "D",
+      TRUE ~ "E"
+    ))
+table(df_deseq_input %>% dplyr::select(is_fmrp_target, case))
+df_deseq_input %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(pvalue))) + 
+  geom_point(aes(colour = case,
+                 size = is_fmrp_target,
+                 shape = is_fmrp_target)) +
+  scale_size_manual(values = c(1, 2)) +
+  scale_shape_manual(values = c(1, 15), 
+         name = "FMRP target", labels = c("No", "Yes")) +
+  scale_colour_manual(values = c("A" = "red", "B" = "salmon", "C" = "navy", "D" = "dodgerblue3", "E" = "gray")) +
+  theme_bw() + 
+  theme(axis.text = element_text(colour = "black")) +
+  guides(colour = "none", size = "none") +
+  labs(y = expression(-log[10]~P), x = expression(log[2]~fold~change))
+```
+
+## Density abundance
+
+```{r}
+df_counts_input <- as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5))
+df_counts_input$mean_value <- log10(rowMeans(df_counts_input))
+df_counts_input$is_fus_target <- rownames(df_counts_input) %in% fus_target_l_fdr
+df_counts_input$is_fmrp_target <- rownames(df_counts_input) %in% fmrp_target
+
+densities <- df_counts_input %>% 
+  mutate(value = (mean_value)) %>%
+  group_by(is_fmrp_target) %>%
+  do({
+    data.frame(x = density(.$value)$x, y = density(.$value)$y, is_fmrp_target = unique(.$is_fmrp_target))
+  })
+
+min_counts <- 2.25
+max_counts <- 4.
+ggplot() +
+  geom_line(data = densities, aes(x = x, y = y, color = as.factor(is_fmrp_target)), size = 1) +
+  geom_ribbon(data = subset(densities, x >= min_counts & x <= max_counts), 
+              aes(x = x, ymin = 0, ymax = y, fill = as.factor(is_fmrp_target)), 
+              alpha = 0.5) +
+  scale_colour_manual(values = c("gray", "dodgerblue3" )) +
+  scale_fill_manual(values = c("gray", "dodgerblue3" )) +
+  cowplot::theme_cowplot() + 
+  geom_vline(xintercept = min_counts, linetype = "dashed", color = "darkgray", size = .3) +
+  geom_vline(xintercept = max_counts, linetype = "dashed", color = "darkgray", size = .3) +
+  theme(panel.grid = element_blank()) +
+  theme(axis.text = element_text(colour = "black")) +
+  guides(colour = "none", size = "none", fill = "none") +
+  labs(y = "Density", x = expression(Log[10]~(Normalized~counts)))
+
+```
+
+## Cumulative frequency
+```{r}
+
+plot_cumulative_freq <- function(df_counts, df_deseq, genes, title,
+                                 min_counts = 0.75, max_counts = 3.25,
+                                 abundance_from = "baseMean",
+                                 filter_pvalue = FALSE,
+                                 keep_targets_outside = FALSE,
+                                 show_legend = FALSE) {
+  df_counts$mean_value <- log10(rowMeans(df_counts))
+  df_counts$is_target <- rownames(df_counts) %in% genes
+
+  df_deseq$is_target <- df_deseq$row %in% genes
+  df_deseq <- df_deseq %>% mutate(
+    zscore = make_signedZscore(log2FoldChange, pvalue)
+  )
+
+  if (abundance_from == "counts") {
+    similar_abund_genes <- rownames(df_counts %>% filter(mean_value >= min_counts &
+                                                        mean_value <= max_counts))
+  } else {
+    similar_abund_genes <- (df_deseq %>% filter(log10(baseMean) >= min_counts &
+                                                log10(baseMean) <= max_counts))$row
+  }
+  print(length(similar_abund_genes))
+
+  z_target <- df_deseq$zscore[df_deseq$is_target == TRUE]
+  z_non_target <- df_deseq$zscore[df_deseq$is_target == FALSE]
+
+  ks_test <- ks.test(z_target, z_non_target)
+  print(table(df_deseq$is_target))
+
+  df_plot <- df_deseq
+  if (filter_pvalue) df_plot <- df_plot %>% filter(pvalue < 0.05)
+  if (keep_targets_outside) {
+    df_plot <- df_plot %>% filter(row %in% similar_abund_genes | is_target)
+  } else {
+    df_plot <- df_plot %>% filter(row %in% similar_abund_genes)
+  }
+
+  ggplot(df_plot,
+         aes(zscore, color = is_target)) +
+    stat_ecdf() +
+    cowplot::theme_cowplot() +
+    scale_colour_manual(values = c("gray", light_purple_color )) +
+    guides(colour = if (show_legend) "legend" else "none", fill = "none") +
+    coord_cartesian(xlim=c(-6,6)) +
+    labs(y = "Density",
+         x = "Z-Score",
+         title = paste("D =", round(ks_test$statistic, 2), ", p =", signif(ks_test$p.value, 2))
+         )
+}
+```
+
+```{r}
+
+plot_cumulative_freq_subset <- function(df_counts, df_deseq, genes, title) {
+  df_counts$mean_value <- log10(rowMeans(df_counts))
+  df_counts$is_target <- rownames(df_counts) %in% genes
+  
+  densities <- df_counts %>% 
+    mutate(value = (mean_value)) %>%
+    group_by(is_target) %>%
+    do({
+      data.frame(x = density(.$value)$x, y = density(.$value)$y, is_target = unique(.$is_target))
+    })
+  
+  min_counts <- 1
+  max_counts <- 4
+  df_deseq$is_target <- df_deseq$row %in% genes
+  df_deseq <- df_deseq %>% mutate(
+    zscore = make_signedZscore(log2FoldChange, pvalue)
+  )
+  similar_abund_genes <- (df_deseq %>% filter(log10(baseMean) >= min_counts &
+                                                      log10(baseMean) <= max_counts))$row
+  print(length(similar_abund_genes))
+
+  
+  z_target <- df_deseq$zscore[df_deseq$is_target == TRUE]
+  z_non_target <- df_deseq$zscore[df_deseq$is_target == FALSE]
+  
+  ks_test <- ks.test(z_target, z_non_target)
+  print(table(df_deseq$is_target))
+  ggplot(df_deseq %>% 
+           filter(row %in% similar_abund_genes | row %in% genes), 
+         aes(zscore, color = is_target)) + 
+    stat_ecdf() + 
+    cowplot::theme_cowplot() + 
+    scale_colour_manual(values = c("gray", light_purple_color )) +
+    guides(colour = "none", fill = "none") +
+    coord_cartesian(xlim=c(-6,6)) +
+    labs(y = "Density", 
+         x = "Z-Score",
+         title = paste("D =", round(ks_test$statistic, 2), ", p =", signif(ks_test$p.value, 2))
+         ) 
+}
+```
+
+```{r}
+
+make_signedZscore <- function( log2FC, pvalue){
+  signedZ <- ifelse(test = log2FC > 0,
+                    yes = qnorm(1 - (pvalue / 2)),
+                    no = qnorm(pvalue / 2) )
+  # high pass - otherwise very low P is set to Inf
+  signedZ[ signedZ > 6 ] <- 6
+  signedZ[ signedZ < -6 ] <- -6
+  return(signedZ)
+}
+
+adult_fus <-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, fus_target_l_fdr,
+                   "(Adults Input)",
+                   abundance_from = "counts", keep_targets_outside = TRUE
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_ip, fus_target_l_fdr,
+                   "(Adults IP)",
+                   abundance_from = "counts", keep_targets_outside = TRUE
+  )
+
+adult_fmrp <-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, fmrp_target,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_ip, fmrp_target,
+                   "(Adults IP)"
+  )
+```
+
+```{r}
+embryo_fus<-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_embryo, select=`input-WT-D14-1`:`input-WT-D14-4`)),
+                   df_deseq_embryo_input, fus_target_l_fdr,
+                   "(Embryo Input)",
+                   abundance_from = "counts", keep_targets_outside = TRUE
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_embryo, select=`input-WT-D14-1`:`input-WT-D14-4`)),
+                   df_deseq_embryo_ip, fus_target_l_fdr,
+                   "(Embryo IP)",
+                   abundance_from = "counts", keep_targets_outside = TRUE
+  )
+```
+
+## G3BP1 / DDX6 / CAPRIN1
+```{r}
+rbp_peaks <- lapply(c("G3BP1","DDX6","CAPRIN1"), function(x)
+  read.delim(sprintf("data/%s_mouse_targets.tsv", x)))
+names(rbp_peaks) <- c("G3BP1","DDX6","CAPRIN1")
+
+min_peaks <- 10
+by_min_peaks <- function(d) d$gene[d$n_exonic_peaks >= min_peaks]
+g3bp1_target <- by_min_peaks(rbp_peaks$G3BP1)
+ddx6_target <- by_min_peaks(rbp_peaks$DDX6)
+caprin1_target <- by_min_peaks(rbp_peaks$CAPRIN1)
+```
+
+```{r}
+adult_g3bp1 <-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, g3bp1_target,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_ip, g3bp1_target,
+                   "(Adults IP)"
+  )
+adult_g3bp1
+```
+
+```{r}
+adult_ddx6 <-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, ddx6_target,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_ip, ddx6_target,
+                   "(Adults IP)"
+  )
+adult_ddx6
+```
+
+```{r}
+adult_caprin1 <-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, caprin1_target,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_ip, caprin1_target,
+                   "(Adults IP)"
+  )
+adult_caprin1
+```
+
+```{r}
+embryo_g3bp1 <-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_embryo, select=`input-WT-D14-1`:`input-WT-D14-4`)),
+                   df_deseq_embryo_input, g3bp1_target,
+                   "(Embryo Input)"
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_embryo, select=`input-WT-D14-1`:`input-WT-D14-4`)),
+                   df_deseq_embryo_ip, g3bp1_target,
+                   "(Embryo IP)"
+  )
+embryo_g3bp1
+```
+
+```{r}
+embryo_ddx6 <-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_embryo, select=`input-WT-D14-1`:`input-WT-D14-4`)),
+                   df_deseq_embryo_input, ddx6_target,
+                   "(Embryo Input)"
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_embryo, select=`input-WT-D14-1`:`input-WT-D14-4`)),
+                   df_deseq_embryo_ip, ddx6_target,
+                   "(Embryo IP)"
+  )
+embryo_ddx6
+```
+
+```{r}
+embryo_caprin1 <-
+plot_cumulative_freq(as.data.frame(subset(normalized_counts_embryo, select=`input-WT-D14-1`:`input-WT-D14-4`)),
+                   df_deseq_embryo_input, caprin1_target,
+                   "(Embryo Input)"
+  ) + plot_cumulative_freq(as.data.frame(subset(normalized_counts_embryo, select=`input-WT-D14-1`:`input-WT-D14-4`)),
+                   df_deseq_embryo_ip, caprin1_target,
+                   "(Embryo IP)"
+  )
+embryo_caprin1
+```
+
+
+
+```{r}
+
+plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, de_gene_common,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_ip, de_gene_common,
+                   "(Adults IP)"
+  )
+```
+
+```{r}
+df1 <- hom3_res
+df2 <- ko_res
+
+filtered_df1 <- df1 %>%
+  filter(pvalue < 0.05)
+
+filtered_df2 <- df2 %>%
+  filter(pvalue < 0.05)
+
+# Find genes with padj < 0.05 in at least one dataframe
+genes_padj_lt_05 <- unique(c(
+  df1$row[df1$padj < 0.05],
+  df2$row[df2$padj < 0.05]
+))
+upreg_genes <- intersect(
+  intersect((filtered_df1 %>% filter(log2FoldChange > 0))$row, 
+            (filtered_df2 %>% filter(log2FoldChange > 0))$row),
+  genes_padj_lt_05
+)
+
+downreg_genes <- intersect(
+  intersect((filtered_df1 %>% filter(log2FoldChange < 0))$row, 
+            (filtered_df2 %>% filter(log2FoldChange < 0))$row),
+  genes_padj_lt_05
+)
+
+```
+
+```{r}
+de_gene_hom3 <- hom3_res %>% filter(padj < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.)
+de_gene_hom3_uniq <- setdiff(de_gene_hom3, 
+                             ko_res %>% filter(pvalue < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.))
+
+de_gene_hom3_up <- hom3_res %>% filter(padj < p_cutoff &
+                                  (log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.)
+de_gene_hom3_uniq_up <- setdiff(de_gene_hom3_up, 
+                             ko_res %>% filter(pvalue < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.))
+de_gene_hom3_down <- hom3_res %>% filter(padj < p_cutoff &
+                                  (log2FoldChange) < logfc_cutoff) %>% .[,"row"] %>% as.vector(.)
+de_gene_hom3_uniq_down <- setdiff(de_gene_hom3_down, 
+                             ko_res %>% filter(pvalue < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.))
+
+
+de_gene_ko_up <- ko_res %>% filter(padj < p_cutoff &
+                                  (log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.)
+de_gene_ko_uniq_up <- setdiff(de_gene_ko_up, 
+                             hom3_res %>% filter(pvalue < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.))
+de_gene_ko_down <- ko_res %>% filter(padj < p_cutoff &
+                                  (log2FoldChange) < logfc_cutoff) %>% .[,"row"] %>% as.vector(.)
+de_gene_ko_uniq_down <- setdiff(de_gene_ko_down, 
+                             hom3_res %>% filter(pvalue < p_cutoff &
+                                  abs(log2FoldChange) > logfc_cutoff) %>% .[,"row"] %>% as.vector(.))
+```
+
+```{r}
+
+plot_cumfreq <- cowplot::plot_grid(plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, upreg_genes,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_adult, select=IP_WT_1:IP_WT_5)),
+                   df_deseq_ip, upreg_genes,
+                   "(Adults IP)"
+  ),
+  plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, downreg_genes,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_adult, select=IP_WT_1:IP_WT_5)),
+                   df_deseq_ip, downreg_genes,
+                   "(Adults IP)"
+  ),
+  plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, de_gene_hom3_uniq_up,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_adult, select=IP_WT_1:IP_WT_5)),
+                   df_deseq_ip, de_gene_hom3_uniq_up,
+                   "(Adults IP)"
+  ),
+  plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, de_gene_hom3_uniq_down,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_adult, select=IP_WT_1:IP_WT_5)),
+                   df_deseq_ip, de_gene_hom3_uniq_down,
+                   "(Adults IP)"
+  ),
+  plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, de_gene_ko_uniq_up,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_adult, select=IP_WT_1:IP_WT_5)),
+                   df_deseq_ip, de_gene_ko_uniq_up,
+                   "(Adults IP)"
+  ),
+  plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_input, select=input_WT_1:input_WT_5)),
+                   df_deseq_input, de_gene_ko_uniq_down,
+                   "(Adults Input)"
+  ) + plot_cumulative_freq_subset(as.data.frame(subset(normalized_counts_adult, select=IP_WT_1:IP_WT_5)),
+                   df_deseq_ip, de_gene_ko_uniq_down,
+                   "(Adults IP)"
+  ), rows=6)
+```
+
+

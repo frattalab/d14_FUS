@@ -1,0 +1,9 @@
+﻿ONTOLOGY,ID,Description,GeneRatio,BgRatio,RichFactor,FoldEnrichment,zScore,pvalue,p.adjust,qvalue,geneID,Count
+BP,GO:0007623,circadian rhythm,16/327,221/19529,0.07239819,4.323743894,6.484620593,1.06E-06,0.003547286,0.003129563,Hnrnpd/Ncor1/Srebf1/Per1/Mta1/Prmt5/Kat5/Ube3a/Nmu/Usp2/Ogt/Fbxl21/Kcnma1/Crem/Scn9a/Rbm4,16
+BP,GO:0043113,receptor clustering,9/327,79/19529,0.113924051,6.803739403,6.745143187,6.82E-06,0.008435122,0.007441815,Dlg3/Sorbs1/Grip2/Grin2b/Sorbs2/Zdhhc2/Gphn/Shisa7/Syngap1,9
+BP,GO:0099173,postsynapse organization,15/327,251/19529,0.059760956,3.569026646,5.345692933,2.33E-05,0.013111839,0.011567809,Actr2/Nrcam/Itsn1/Sorbs1/Ube3a/Grip2/Grin2b/Sorbs2/Ptprf/Shank1/Zdhhc2/Gphn/Shisa7/Ppfia2/Syngap1,15
+BP,GO:0034453,microtubule anchoring,5/327,23/19529,0.217391304,12.98298099,7.503678276,3.35E-05,0.013111839,0.011567809,Kif3a/Pcm1/Clasp2/Hook3/Clasp1,5
+BP,GO:0050767,regulation of neurogenesis,21/327,477/19529,0.044025157,2.629257785,4.701194666,5.94E-05,0.013111839,0.011567809,Braf/Efnb3/Hap1/Rnf112/Mapt/Actr2/Synj1/Prmt5/Slit1/Fn1/Ppp3ca/Ski/Pcm1/Il34/Ptprf/Kdm1a/Hook3/Golga4/Ttc3/Chd7/Syngap1,21
+BP,GO:0048311,mitochondrion distribution,5/327,26/19529,0.192307692,11.48494472,6.981225004,6.29E-05,0.013111839,0.011567809,Hap1/Mapt/Mef2a/Mtm1/Ogt,5
+BP,GO:0007030,Golgi organization,10/327,133/19529,0.07518797,4.490354326,5.270705814,8.27E-05,0.014516008,0.012806626,Myo18a/Prmt5/Sec16a/Clasp2/Arhgap21/Vps13b/Akap9/Tmed5/Clasp1/Syne1,10
+BP,GO:0050803,regulation of synapse structure or activity,15/327,312/19529,0.048076923,2.87123618,4.348031028,0.000266116,0.030612541,0.027007657,Efnb3/Actr2/Nrcam/Itsn1/Ube3a/Adgrl2/Grin2b/Ptprf/Ogt/Lingo2/Eif4g1/Slitrk4/Ppfia2/Syngap1/Malat1,15
